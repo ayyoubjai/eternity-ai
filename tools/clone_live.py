@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+from clone_profiles import load_profile
+
 
 PROTO = "@@CLONE@@"
 
@@ -211,7 +213,7 @@ class Service:
             return
 
         self.diagnostics.append(line)
-        if self.verbose:
+        if self.verbose or line.startswith(("Live recording saved:", "Live recording failed:", "Live recording audio mux failed:")):
             print(f"[{self.name}] {line}")
 
 
@@ -281,7 +283,7 @@ class Service:
                 return msg
 
 
-    def quit(self):
+    def quit(self, timeout=60):
 
         if self.proc.poll() is not None:
             return
@@ -297,7 +299,7 @@ class Service:
         # encoder, and mux the session audio before exiting. Five seconds
         # is not sufficient for a long session or a high-resolution frame.
         try:
-            self.proc.wait(timeout=60)
+            self.proc.wait(timeout=timeout)
             return
         except subprocess.TimeoutExpired:
             pass
@@ -675,6 +677,7 @@ class GStreamerOfflinePlayer:
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--clone", required=True, help="Name created with tools/clone_profiles.py create")
 
 parser.add_argument(
     "--mode",
@@ -719,28 +722,9 @@ parser.add_argument(
     help="Render and save offline videos without opening a media window.",
 )
 
-parser.add_argument(
-    "--avatar",
-    default=str(
-        ROOT / "inputs/avatar_face.png"
-    ),
-)
-
-parser.add_argument(
-    "--reference",
-    default=str(
-        ROOT
-        / "inputs/voice_refs/english_full.wav"
-    ),
-)
-
-parser.add_argument(
-    "--reference-text-file",
-    default=str(
-        ROOT
-        / "inputs/voice_refs/english_full.txt"
-    ),
-)
+parser.add_argument("--avatar", help="Override the selected clone portrait")
+parser.add_argument("--reference", help="Override the selected clone voice WAV")
+parser.add_argument("--reference-text-file", help="Override the selected clone transcript")
 
 parser.add_argument(
     "--qwen-gpu-mib",
@@ -794,15 +778,51 @@ parser.add_argument(
     default=10,
 )
 
-parser.add_argument(
+recording = parser.add_mutually_exclusive_group()
+recording.add_argument(
     "--record-video",
-    default=str(
-        ROOT / "outputs/ditto/ditto_live_session.mp4"
-    ),
-    help="Record the live session to this MP4 path.",
+    metavar="PATH",
+    help="Save live video and voice to PATH (default: a unique session MP4).",
+)
+recording.add_argument(
+    "--no-record-video",
+    action="store_true",
+    help="Disable saving the live session.",
+)
+parser.add_argument(
+    "--script-file",
+    help="UTF-8 demo script: one utterance per nonempty line; exit when finished.",
 )
 
 args = parser.parse_args()
+try:
+    profile = load_profile(ROOT, args.clone)
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    parser.error(f"Cannot load clone {args.clone!r}: {exc}. Create it with tools/clone_profiles.py create")
+for key, value in profile.items():
+    if getattr(args, key) is None:
+        setattr(args, key, value)
+session_output = ROOT / "outputs" / args.clone / f"session_{time.time_ns()}"
+
+script_lines = None
+if args.script_file:
+    try:
+        script_lines = iter(Path(args.script_file).read_text(encoding="utf-8").splitlines())
+    except OSError as exc:
+        parser.error(f"Cannot read script: {exc}")
+if args.mode == "offline" and (args.record_video or args.no_record_video):
+    parser.error("Recording options apply to --mode live; offline already saves each response.")
+if args.mode == "live" and not args.no_record_video:
+    if not args.record_video:
+        args.record_video = str(
+            session_output / "session.mp4"
+        )
+    record_path = Path(args.record_video).resolve()
+    if record_path.suffix.lower() != ".mp4":
+        parser.error("--record-video must end in .mp4")
+    if record_path.exists():
+        parser.error(f"Recording already exists; choose a new path: {record_path}")
+    args.record_video = str(record_path)
 
 
 qwen_python = (
@@ -864,10 +884,7 @@ cudnn8 = (
     )
 )
 
-live_output = (
-    ROOT
-    / "outputs/live"
-)
+live_output = session_output / "audio"
 
 live_output.mkdir(
     parents=True,
@@ -967,11 +984,12 @@ if args.mode == "live":
         "--source", str(Path(args.avatar).resolve()),
         "--data-root", str(ditto_data),
         "--cfg", str(ditto_cfg),
-        "--output-dir", str(live_output),
+        "--output-dir", str(session_output / "live"),
         "--audio-delay-ms", str(args.audio_delay_ms),
         "--prebuffer-frames", str(args.prebuffer_frames),
-        "--record-video", str(Path(args.record_video).resolve()),
     ]
+    if args.record_video:
+        ditto_cmd.extend(["--record-video", args.record_video])
 else:
     ditto_cmd = [
         str(ditto_python),
@@ -980,7 +998,7 @@ else:
         "--source", str(Path(args.avatar).resolve()),
         "--data-root", str(ditto_data),
         "--cfg", str(ditto_offline_cfg),
-        "--output-dir", str(ROOT / "outputs/ditto/offline"),
+        "--output-dir", str(session_output / "videos"),
         "--style", args.style,
     ]
     if args.video_filter:
@@ -1082,6 +1100,9 @@ try:
     print("Type a sentence and press Enter.")
     if args.mode == "live":
         print("The clone will speak it in the live window.")
+        if args.record_video:
+            print(f"Recording video + voice: {args.record_video}")
+            print("Use /quit and wait for finalization to save the MP4.")
     else:
         if args.no_playback:
             print("Each reply is rendered completely and saved.")
@@ -1101,12 +1122,15 @@ try:
 
         try:
 
-            text = input(
-                "you> "
-            ).strip()
+            if script_lines is None:
+                text = input("you> ").strip()
+            else:
+                text = next(script_lines).strip()
+                print(f"you> {text}")
 
         except (
             EOFError,
+            StopIteration,
             KeyboardInterrupt,
         ):
 
@@ -1218,4 +1242,6 @@ finally:
         qwen.quit()
 
     if ditto is not None:
-        ditto.quit()
+        if args.mode == "live":
+            print("Draining live frames and finalizing recording; please wait...")
+        ditto.quit(timeout=None if args.mode == "live" else 60)

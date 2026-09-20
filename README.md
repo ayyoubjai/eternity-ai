@@ -9,6 +9,19 @@ The default offline mode renders a complete synchronized MP4, applies a visual
 style, and loads each response into one persistent MPV window. A lower-latency
 live mode is included for experimentation.
 
+## Results
+
+Unofficial AI-generated **Mr. House (Fallout: New Vegas)** demonstrations,
+using the local clone name `dr-house`. Click a preview to open its video with sound.
+
+| Example | Video preview |
+| --- | --- |
+| House demo 1 | [![Play House demo 1](examples/dr-house/ditto_offline_20260905_070806_00002.jpg)](examples/dr-house/ditto_offline_20260905_070806_00002.mp4) |
+| House demo 2 | [![Play House demo 2](examples/dr-house/ditto_offline_20260905_072719_00002.jpg)](examples/dr-house/ditto_offline_20260905_072719_00002.mp4) |
+| House demo 3 | [![Play House demo 3](examples/dr-house/ditto_offline_20260905_073602_00002.jpg)](examples/dr-house/ditto_offline_20260905_073602_00002.mp4) |
+| House demo 4 | [![Play House demo 4](examples/dr-house/ditto_offline_20260905_081237_00003.jpg)](examples/dr-house/ditto_offline_20260905_081237_00003.mp4) |
+| House demo 5 | [![Play House demo 5](examples/dr-house/ditto_offline_20260905_081237_00004.jpg)](examples/dr-house/ditto_offline_20260905_081237_00004.mp4) |
+
 ## What is in the repository
 
 Application orchestration and service code is in `tools/`. Ditto is pinned as a
@@ -51,23 +64,66 @@ script resumes interrupted downloads and verifies every file:
 ./scripts/download-models.sh
 ```
 
-Add private input files locally:
+Create a clone on the host (Python 3.10+):
+
+```bash
+python3 tools/clone_profiles.py create
+```
+
+The wizard asks for a clone name, portrait, voice WAV, and the exact transcript
+of that reference recording. Enter a file path to copy it into the project,
+`camera` to take a photo, `record` to record the microphone, or `write` to enter
+the transcript. Finish a typed transcript by pressing Enter on an empty line (or entering `.`).
+Camera capture uses Linux V4L2; microphone recording uses PulseAudio/PipeWire.
+Both require host FFmpeg and access to the device. Recording asks for a duration
+and starts after you press Enter. Supplied paths support `~`; enter paths without
+shell quotes at the interactive prompt. Original files are left untouched.
+
+You can prefill any fields and answer the remaining prompts:
+
+```bash
+python3 tools/clone_profiles.py create --name personal --image /path/to/portrait.png
+python3 tools/clone_profiles.py list
+```
+
+Each clone is self-contained. Each run gets a separate output session:
 
 ```text
 inputs/
-├── avatar_face.png
-└── voice_refs/
-    ├── english_full.wav
-    └── english_full.txt
+└── personal/
+    ├── clone.json
+    ├── avatar.png
+    ├── reference.wav
+    └── reference.txt
+outputs/
+└── personal/
+    └── session_<timestamp>/
+        ├── audio/           # generated voice WAVs
+        ├── videos/          # complete offline response MP4s
+        ├── live/            # live model working files
+        ├── session.mp4      # complete live recording, when enabled
+        └── session.mp4.json # recording timing metadata
 ```
 
-`english_full.txt` must contain the exact transcript spoken in
-`english_full.wav`. These files are ignored by Git.
+Only files relevant to the chosen mode are created. Inputs and outputs remain
+ignored by Git. Clone names use lowercase letters, digits, hyphens and underscores.
+Existing names are rejected, and cancelled creation leaves no partial clone.
+
+The existing House assets are configured locally as `dr-house`:
+
+```bash
+./scripts/run-docker.sh --clone dr-house --mode live
+```
+
+Older House-generated audio and videos are preserved under
+`outputs/dr-house/legacy/audio/` and `outputs/dr-house/legacy/videos/`.
+New runs use separate session directories. All runs require `--clone NAME`.
+Private clone profiles are local and are not included when cloning this repository.
 
 Run the desktop container:
 
 ```bash
-./scripts/run-docker.sh --mode offline
+./scripts/run-docker.sh --clone personal --mode offline
 ```
 
 The first run builds the image and downloads the Qwen model into
@@ -82,13 +138,13 @@ As a temporary alternative, preserve the desktop variables explicitly:
 
 ```bash
 sudo --preserve-env=DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR \
-  ./scripts/run-docker.sh --mode offline
+  ./scripts/run-docker.sh --clone personal --mode offline
 ```
 
 To force an image rebuild after changing dependencies:
 
 ```bash
-./scripts/run-docker.sh --build --mode offline
+./scripts/run-docker.sh --build --clone personal --mode offline
 ```
 
 The build and runtime use the Linux host network for package and first-run Qwen
@@ -102,7 +158,7 @@ restart Docker before retrying.
 Offline mode is the recommended synchronized path:
 
 ```bash
-./scripts/run-docker.sh --mode offline
+./scripts/run-docker.sh --clone personal --mode offline
 ```
 
 The full audio duration determines Ditto's exact 25 FPS frame count. Only after
@@ -112,16 +168,43 @@ one MP4. Playback waits for the file's real end-of-stream.
 Live mode streams raw audio and frames through FFmpeg/FFplay:
 
 ```bash
-./scripts/run-docker.sh --mode live
+./scripts/run-docker.sh --clone personal --mode live
 ```
 
 Live mode has lower initial latency, but its timing also depends on real-time
 generation throughput, buffering, desktop scheduling, and GPU contention.
 
+### Save live video and voice
+
+Live mode saves the generated session, including synthesized voice, to a unique
+`outputs/<clone>/session_<timestamp>/session.mp4` by default. Set a filename explicitly or
+turn recording off:
+
+```bash
+./scripts/run-docker.sh --clone personal --mode live --record-video /app/outputs/personal/my-demo.mp4
+./scripts/run-docker.sh --clone personal --mode live --no-record-video
+```
+
+Type `/quit` (or `/exit`) and wait for `Live recording saved` before closing the
+terminal. Finalization drains queued frames and combines the timestamped voice
+clips into the MP4. Existing destination files are rejected to prevent accidental
+overwriting. This records the generated media timeline, including inter-utterance
+gaps; it does not capture the desktop, microphone, or wall-clock time spent typing
+and waiting for generation. A timing JSON sidecar stays beside the recording.
+
+For repeatable playback, `--script-file PATH` reads one utterance per nonempty
+line and exits after processing it. Put private scripts under `inputs/<clone>/`
+and use `/app/inputs/<clone>/script.txt` inside Docker.
+
+Finished videos remain under `outputs/<clone>/session_<timestamp>/`.
+`examples/` contains selected public demo videos and their README preview images.
+Copy only finished clips you want to publish there; private inputs and other
+outputs remain ignored by Git.
+
 For a machine without a desktop display, render files without playback:
 
 ```bash
-docker compose run --rm digital-clone
+CLONE=personal docker compose run --rm digital-clone
 ```
 
 Generated files are written under `outputs/`.
@@ -131,11 +214,11 @@ Generated files are written under `outputs/`.
 Offline output defaults to the `cinematic` treatment. Built-in options are:
 
 ```bash
-./scripts/run-docker.sh --mode offline --style natural
-./scripts/run-docker.sh --mode offline --style cinematic
-./scripts/run-docker.sh --mode offline --style warm
-./scripts/run-docker.sh --mode offline --style cool
-./scripts/run-docker.sh --mode offline --style noir
+./scripts/run-docker.sh --clone personal --mode offline --style natural
+./scripts/run-docker.sh --clone personal --mode offline --style cinematic
+./scripts/run-docker.sh --clone personal --mode offline --style warm
+./scripts/run-docker.sh --clone personal --mode offline --style cool
+./scripts/run-docker.sh --clone personal --mode offline --style noir
 ```
 
 `natural` preserves Ditto's video stream without re-encoding it. Other presets
@@ -145,7 +228,7 @@ audio timestamps.
 Advanced compositions can supply any FFmpeg single-input video filter chain:
 
 ```bash
-./scripts/run-docker.sh --mode offline \
+./scripts/run-docker.sh --clone personal --mode offline \
   --video-filter "eq=contrast=1.1:saturation=0.85,vignette=PI/4"
 ```
 
@@ -209,9 +292,9 @@ retains NVIDIA runtime driver paths.
 make init          # initialize the Ditto submodule
 make models        # download Ditto configs and Ampere+ engines
 make build         # build the local image
-make run           # synchronized desktop/offline mode
-make run-live      # experimental live mode
-make run-headless  # offline rendering without a media window
+make run CLONE=personal           # synchronized desktop/offline mode
+make run-live CLONE=personal      # experimental live mode
+make run-headless CLONE=personal  # offline rendering without a media window
 ```
 
 Type `/quit` or `/exit` in the application to shut down both model services.

@@ -18,4 +18,4 @@ services:
       - ./outputs:/app/outputs
       - ./vendors/Ditto/checkpoints:/app/vendors/Ditto/checkpoints:ro
       - ./.cache/huggingface:/cache/huggingface
-    command: ["--mode", "offline", "--no-playback", "--style", "cinematic"]
+    command: ["--clone", "${CLONE:-default}", "--mode", "offline", "--no-playback", "--style", "cinematic"]

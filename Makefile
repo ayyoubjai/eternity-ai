@@ -1,3 +1,5 @@
+CLONE ?= default
+
 .PHONY: init models build run run-live run-headless
 
 init:
@@ -10,10 +12,10 @@ build:
 	docker build --network host -t digital-clone:local .
 
 run:
-	./scripts/run-docker.sh --mode offline --style cinematic
+	./scripts/run-docker.sh --clone "$(CLONE)" --mode offline --style cinematic
 
 run-live:
-	./scripts/run-docker.sh --mode live
+	./scripts/run-docker.sh --clone "$(CLONE)" --mode live
 
 run-headless:
-	docker compose run --rm digital-clone
+	CLONE="$(CLONE)" docker compose run --rm digital-clone

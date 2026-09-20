@@ -716,6 +716,7 @@ class LiveVideoWriter:
             "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac",
+            "-movflags", "+faststart",
         ])
 
         # Ditto flushes extra silent frames when it shuts down. Keep the
@@ -807,7 +808,7 @@ class LiveVideoWriter:
                     pass
                 self.audio_thread.join(timeout=5)
 
-        self.playback_thread.join(timeout=60)
+        self.playback_thread.join()
 
         if self.playback_thread.is_alive() and self.video_write is not None:
             try:

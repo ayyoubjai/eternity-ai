@@ -15,7 +15,7 @@ if [[ "${1:-}" == "--build" ]]; then
 fi
 
 mkdir -p \
-    "${repo_root}/inputs/voice_refs" \
+    "${repo_root}/inputs" \
     "${repo_root}/outputs" \
     "${repo_root}/.cache/huggingface" \
     "${repo_root}/.runtime/home" \
