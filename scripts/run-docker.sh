@@ -68,8 +68,8 @@ if [[ -n "${DISPLAY:-}" ]]; then
     fi
 else
     requested_args=" $* "
-    if [[ "${requested_args}" == *" --mode live "* || "${requested_args}" == *" --mode=live "* ]]; then
-        echo "Live mode requires a desktop DISPLAY; use offline --no-playback here." >&2
+    if [[ "${requested_args}" == *" --mode online "* || "${requested_args}" == *" --mode=online "* || "${requested_args}" == *" --mode live "* || "${requested_args}" == *" --mode=live "* ]]; then
+        echo "Online mode requires a desktop DISPLAY; use offline --no-playback here." >&2
         exit 1
     fi
     echo "No DISPLAY detected; offline output will be saved without playback." >&2

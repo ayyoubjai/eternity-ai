@@ -1,6 +1,6 @@
 CLONE ?= default
 
-.PHONY: init models build run run-live run-headless
+.PHONY: init models build run run-online run-live run-headless
 
 init:
 	git submodule update --init --recursive
@@ -14,8 +14,10 @@ build:
 run:
 	./scripts/run-docker.sh --clone "$(CLONE)" --mode offline --style cinematic
 
-run-live:
-	./scripts/run-docker.sh --clone "$(CLONE)" --mode live
+run-live: run-online
+
+run-online:
+	./scripts/run-docker.sh --clone "$(CLONE)" --mode online
 
 run-headless:
 	CLONE="$(CLONE)" docker compose run --rm digital-clone

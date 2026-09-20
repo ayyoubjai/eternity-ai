@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from clone_profiles import load_profile
+from online_chunks import stream_phrases
 
 
 PROTO = "@@CLONE@@"
@@ -326,7 +327,7 @@ class Service:
             pass
 
 
-class MpvOfflinePlayer:
+class PersistentMpvPlayer:
 
     def __init__(self):
         self.socket_path = Path(
@@ -681,10 +682,10 @@ parser.add_argument("--clone", required=True, help="Name created with tools/clon
 
 parser.add_argument(
     "--mode",
-    choices=("live", "offline"),
-    default="live",
+    choices=("online", "offline", "live"),
+    default="online",
     help=(
-        "live streams generated frames; offline renders a complete video "
+        "online streams synchronized audio and frames; offline renders a complete video "
         "for each message and then plays it"
     ),
 )
@@ -782,19 +783,30 @@ recording = parser.add_mutually_exclusive_group()
 recording.add_argument(
     "--record-video",
     metavar="PATH",
-    help="Save live video and voice to PATH (default: a unique session MP4).",
+    help="Save online video and voice to PATH (default: a unique session MP4).",
 )
 recording.add_argument(
     "--no-record-video",
     action="store_true",
-    help="Disable saving the live session.",
+    help="Disable saving the online session.",
 )
 parser.add_argument(
     "--script-file",
     help="UTF-8 demo script: one utterance per nonempty line; exit when finished.",
 )
 
+parser.add_argument(
+    "--chunk-words", type=int, default=16,
+    help="Experimental online phrase generation: maximum words per chunk (default 16; 0 disables).",
+)
 args = parser.parse_args()
+if args.chunk_words < 0:
+    parser.error("--chunk-words must be nonnegative")
+if args.mode == "live":
+    print("--mode live is deprecated; use --mode online.")
+    args.mode = "online"
+if args.mode == "online" and args.no_playback:
+    parser.error("--no-playback is supported only in offline mode")
 try:
     profile = load_profile(ROOT, args.clone)
 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -811,8 +823,8 @@ if args.script_file:
     except OSError as exc:
         parser.error(f"Cannot read script: {exc}")
 if args.mode == "offline" and (args.record_video or args.no_record_video):
-    parser.error("Recording options apply to --mode live; offline already saves each response.")
-if args.mode == "live" and not args.no_record_video:
+    parser.error("Recording options apply to --mode online; offline already saves each response.")
+if args.mode == "online" and not args.no_record_video:
     if not args.record_video:
         args.record_video = str(
             session_output / "session.mp4"
@@ -903,14 +915,14 @@ required = [
     qwen_service_py,
     (
         ditto_service_py
-        if args.mode == "live"
+        if args.mode == "online"
         else ditto_offline_service_py
     ),
 
     ditto_data,
     (
         ditto_cfg
-        if args.mode == "live"
+        if args.mode == "online"
         else ditto_offline_cfg
     ),
 
@@ -921,8 +933,8 @@ for executable in ("ffmpeg",):
     if shutil.which(executable) is None:
         required.append(Path(f"missing executable: {executable}"))
 
-if args.mode == "live" and shutil.which("ffplay") is None:
-    required.append(Path("missing executable: ffplay"))
+if not args.no_playback and shutil.which("mpv") is None:
+    required.append(Path("missing executable: mpv"))
 
 
 missing = [
@@ -976,7 +988,7 @@ ditto_library_paths.extend(
 ditto_env["LD_LIBRARY_PATH"] = os.pathsep.join(ditto_library_paths)
 
 
-if args.mode == "live":
+if args.mode == "online":
     ditto_cmd = [
         str(ditto_python),
         str(ditto_service_py),
@@ -984,7 +996,7 @@ if args.mode == "live":
         "--source", str(Path(args.avatar).resolve()),
         "--data-root", str(ditto_data),
         "--cfg", str(ditto_cfg),
-        "--output-dir", str(session_output / "live"),
+        "--output-dir", str(session_output / "online"),
         "--audio-delay-ms", str(args.audio_delay_ms),
         "--prebuffer-frames", str(args.prebuffer_frames),
     ]
@@ -1040,18 +1052,12 @@ startup = StartupProgress(
     total=2,
     enabled=not args.verbose and not args.no_progress,
 )
-offline_player = (
-    (
-        MpvOfflinePlayer()
-        if shutil.which("mpv")
-        else GStreamerOfflinePlayer()
-    )
-    if args.mode == "offline" and not args.no_playback
-    else None
-)
+player = PersistentMpvPlayer() if not args.no_playback else None
 
-if isinstance(offline_player, MpvOfflinePlayer):
-    startup.set_visual_callback(offline_player.show_progress)
+if isinstance(player, PersistentMpvPlayer):
+    startup.set_visual_callback(player.show_progress)
+    if args.mode == "online":
+        ditto_cmd.extend(["--mpv-socket", str(player.socket_path)])
 
 
 try:
@@ -1090,16 +1096,16 @@ try:
     startup.complete("Voice model ready")
     startup.finish()
 
-    if isinstance(offline_player, MpvOfflinePlayer):
-        offline_player.show_avatar(args.avatar)
+    if isinstance(player, PersistentMpvPlayer):
+        player.show_avatar(args.avatar)
 
 
     print("=" * 60)
     print(f"DIGITAL CLONE READY — {args.mode.upper()}")
     print()
     print("Type a sentence and press Enter.")
-    if args.mode == "live":
-        print("The clone will speak it in the live window.")
+    if args.mode == "online":
+        print("The clone will speak it in the persistent window.")
         if args.record_video:
             print(f"Recording video + voice: {args.record_video}")
             print("Use /quit and wait for finalization to save the MP4.")
@@ -1154,6 +1160,12 @@ try:
         rid = request_id
 
 
+        if args.mode == "online":
+            player._preserve_window_geometry()
+            stream_phrases(qwen, ditto, text, rid, args.chunk_words)
+            print("Response queued; playback continues in the persistent window.")
+            continue
+
         print("Generating voice...")
 
 
@@ -1194,7 +1206,8 @@ try:
                 print(f"  Voice RTF: {rtf:.2f}x")
 
 
-        if args.mode == "live":
+        if args.mode == "online":
+            player._preserve_window_geometry()
             ditto.send({
                 "cmd": "play",
                 "id": rid,
@@ -1215,14 +1228,14 @@ try:
                 f"  ✓ Video rendered in "
                 f"{video['generation_seconds']:.2f}s"
             )
-            if offline_player is not None:
+            if player is not None:
                 print("Playing...")
-                offline_player.play(
+                player.play(
                     video["path"],
                     video["duration"],
                 )
-                if isinstance(offline_player, MpvOfflinePlayer):
-                    offline_player.show_avatar(args.avatar)
+                if isinstance(player, PersistentMpvPlayer):
+                    player.show_avatar(args.avatar)
             print(f"  ✓ Saved: {video['path']}")
             print()
 
@@ -1235,13 +1248,13 @@ finally:
     print()
     print("Stopping digital clone...")
 
-    if offline_player is not None:
-        offline_player.close()
-
     if qwen is not None:
         qwen.quit()
 
     if ditto is not None:
-        if args.mode == "live":
-            print("Draining live frames and finalizing recording; please wait...")
-        ditto.quit(timeout=None if args.mode == "live" else 60)
+        if args.mode == "online":
+            print("Draining online frames and finalizing recording; please wait...")
+        ditto.quit(timeout=None if args.mode == "online" else 60)
+
+    if player is not None:
+        player.close()

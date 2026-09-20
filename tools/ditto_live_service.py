@@ -3,6 +3,7 @@ import json
 import math
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -58,6 +59,8 @@ parser.add_argument(
     help="Record the paced live session to this MP4 path.",
 )
 
+parser.add_argument("--mpv-socket", help="Reuse the launcher persistent MPV window")
+
 args = parser.parse_args()
 
 
@@ -82,7 +85,10 @@ class LiveVideoWriter:
         audio_delay_ms=0,
         prebuffer_frames=10,
         record_path=None,
+        mpv_socket=None,
     ):
+        self.mpv_socket = mpv_socket
+        self.stream_fifo = None
         self.fps = fps
         self.audio_delay = audio_delay_ms / 1000
         self.frame_period = 1.0 / fps
@@ -189,7 +195,13 @@ class LiveVideoWriter:
         player_cmd = [
             "ffplay",
             "-loglevel", "error",
-            "-fflags", "nobuffer",
+            # NUT already declares both raw stream formats. Default probing
+            # waits for more packets on short utterances, often until /quit.
+            # Keep packets read during probing: nobuffer can discard them.
+            "-f", "nut",
+            "-probesize", "32",
+            "-analyzeduration", "1",
+            "-fpsprobesize", "0",
             "-flags", "low_delay",
             "-framedrop",
             "-sync", "audio",
@@ -197,12 +209,39 @@ class LiveVideoWriter:
             "-i", "-",
         ]
 
-        self.proc = subprocess.Popen(
-            player_cmd,
-            stdin=self.mux_proc.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if self.mpv_socket:
+            # The launcher owns this window; only replace its media source.
+            self.stream_fifo = Path(self.mpv_socket + ".nut")
+            os.mkfifo(self.stream_fifo, 0o600)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(self.mpv_socket)
+                for command in (
+                    ["set_property", "options/cache", "no"],
+                    ["set_property", "options/demuxer-lavf-format", "nut"],
+                    ["set_property", "options/demuxer-lavf-probesize", 32],
+                    ["set_property", "options/demuxer-lavf-analyzeduration", 0.000001],
+                    ["loadfile", str(self.stream_fifo), "replace"],
+                    ["set_property", "pause", False],
+                ):
+                    client.sendall((json.dumps({"command": command}) + "\n").encode())
+            # Forward the mux stream to the FIFO without creating another window.
+            self.proc = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import shutil,sys; "
+                 "f=open(sys.argv[1], 'wb', buffering=0); "
+                 "shutil.copyfileobj(sys.stdin.buffer, f, 8192)",
+                 str(self.stream_fifo)],
+                stdin=self.mux_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=None,
+            )
+        else:
+            self.proc = subprocess.Popen(
+                player_cmd,
+                stdin=self.mux_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         self.mux_proc.stdout.close()
 
         self.video_write = os.fdopen(
@@ -850,6 +889,8 @@ class LiveVideoWriter:
                     pass
 
         self._finish_recording()
+        if self.stream_fifo is not None:
+            self.stream_fifo.unlink(missing_ok=True)
 
 
 class AudioFeeder:
@@ -935,10 +976,11 @@ class AudioFeeder:
         self,
         path,
         request_id,
+        gap_ms=None,
     ):
 
         self.jobs.put(
-            (path, request_id)
+            (path, request_id, gap_ms)
         )
 
 
@@ -1052,7 +1094,9 @@ class AudioFeeder:
             if item is None:
                 break
 
-            path, request_id = item
+            path, request_id, gap_ms = item
+            gap_samples = (self.gap_samples if gap_ms is None
+                           else round(max(0, gap_ms) * 16000 / 1000))
 
             try:
 
@@ -1086,7 +1130,7 @@ class AudioFeeder:
                     1,
                 )
                 gap_frames = math.ceil(
-                    self.gap_samples * self.fps / 16000
+                    gap_samples * self.fps / 16000
                 )
 
                 start_frame = max(
@@ -1108,7 +1152,7 @@ class AudioFeeder:
                 )
 
                 gap = np.zeros(
-                    self.gap_samples,
+                    gap_samples,
                     dtype=np.float32,
                 )
 
@@ -1246,6 +1290,7 @@ live_writer = LiveVideoWriter(
     audio_delay_ms=args.audio_delay_ms,
     prebuffer_frames=args.prebuffer_frames,
     record_path=args.record_video,
+    mpv_socket=args.mpv_socket,
 )
 
 sdk.writer = live_writer
@@ -1294,6 +1339,7 @@ for line in sys.stdin:
         feeder.submit(
             msg["path"],
             msg.get("id"),
+            msg.get("gap_ms"),
         )
 
 
