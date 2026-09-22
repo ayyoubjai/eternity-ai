@@ -1,4 +1,4 @@
-# Digital Clone
+# Eternity AI
 
 An interactive talking-head clone built from two model families only:
 
@@ -64,8 +64,8 @@ architectures.
 Clone with the pinned Ditto source:
 
 ```bash
-git clone --recurse-submodules <your-github-repository-url>
-cd digital-clone
+git clone --recurse-submodules https://github.com/ayyoubjai/eternity-ai.git
+cd eternity-ai
 ```
 
 Download the pinned Ditto configuration and Ampere+ TensorRT engines. The
